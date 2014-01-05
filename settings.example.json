@@ -1,0 +1,7 @@
+{
+    "ROOTDIR":"/home/asmedrano/Desktop/SampleDir/", 
+    "CACHEDIR":"/tmp/", 
+    "CACHE_HEADER_EXPIRE":"3600",
+    "CORS":"*"
+
+}

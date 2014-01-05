@@ -1,9 +1,13 @@
+/* TODO:
+    Gif encoding?
+
+*/
+
 package main
 
 import(
     "io/ioutil"
     "regexp"
-	//"encoding/base64"
     "github.com/codegangsta/martini"
     "bitbucket.org/gosimple/slug"
     "github.com/nfnt/resize"
@@ -13,15 +17,20 @@ import(
     "strconv"
     "path/filepath"
     "os"
-    "fmt"
+    "log"
     "image"
     "image/jpeg"
-    //"image/gif"
     "image/png"
 )
 
-var rootDir string
-var cacheDir string
+type Config struct {
+    ROOTDIR string  // the ROOT directory to crawl
+    CACHEDIR string // where to store transformed images
+    CACHE_HEADER_EXPIRE string // Request Header Cache-Control
+    CORS string // Request Header Access-Control-Allow-Origin
+}
+
+var APP_CONFIG Config
 
 // filter by rexp and return true or false if it passes our filter
 func filter(rexp string, input string) bool {
@@ -60,7 +69,7 @@ func listDir(dirpath string, filemode string) ([]map[string]string, map[string]s
         }else if filemode == "f"{
             obj := make(map[string]string)
             name := f.Name()
-            dirslug := slug.Make(strings.Replace(dirpath, rootDir, "", 2))
+            dirslug := slug.Make(strings.Replace(dirpath, APP_CONFIG.ROOTDIR, "", 2))
             if f.Mode().IsRegular(){
                 // we'll all ways filter out the .hidden directories
                 if filter("^\\.", name) == false {
@@ -97,22 +106,46 @@ func fileExists(path string) bool {
 
 // transform an image based on width and height and cache it.
 func transformImage(src string, width string, height string) string{
+
+    // set some defaults
+    if width == "" && height =="" {
+        //TODO:Log width and height cant be empty
+        return src
+    }
+
+    if width == "" && height !="" { width = "0"}
+
+    if height == "" && width != ""{ height = "0"}
+
+    // We need to limit width and height to keep people from filling up disks an arbitray amount of combos of w + h
+    validSizes := map[string]bool{
+        "0":true,
+        "100":true,
+        "200":true,
+        "300":true,
+        "400":true,
+        "500":true,
+        "600":true,
+        "700":true, 
+    }
+
+    _, validW :=validSizes[width]
+    _, validH :=validSizes[height]
+    
+    if !validW || !validH {
+        // TODO: LOG
+        return src
+    }
+
     fullName := filepath.Base(src) // the base name of the file
     ext := filepath.Ext(fullName)  // the extension 
     baseName := strings.Replace(fullName, ext, "", -1)
     cachedName := slug.Make(baseName + "-w" + width +"-h"+ height)+ext
+    cacheDir := APP_CONFIG.CACHEDIR
+
     if fileExists(cacheDir + cachedName) == false {
-        // set some defaults
-        if width == "" && height =="" {
-            //TODO:Log width and height cant be empty
-            return src
-        }
 
-        if width == "" && height !="" { width = "0"}
-
-        if height == "" && width != ""{ height = "0"}
-
-        // generate an image
+        // this image is not in the cache generate an image
 
         // open src
         file, err := os.Open(src)
@@ -168,52 +201,90 @@ func transformImage(src string, width string, height string) string{
     return src
 }
 
-func main() {
-  m := martini.Classic()
-  rootDir  = "/home/asmedrano/" // TODO: Root Dir should be configurable
-  cacheDir = "/tmp/" // TODO create this directory if it doesnt exist and this should be configurable
 
 
-  m.Get("1/", JSONResp, func() string {
-    // List Directories with slugs
-    objects, _ := listDir(rootDir, "d") 
-    return objsToJson(objects)
-  })
-
-
-  // List a specific directory using its slug as a mapping
-  m.Get("/:dir", JSONResp,  func(params martini.Params) string {
-    _, idx := listDir(rootDir, "d") 
-    objects, _:= listDir(rootDir + idx[params["dir"]], "f")
-    return objsToJson(objects)
-
-  })
-
-  m.Get("/:dir/:obj", func(res http.ResponseWriter, req *http.Request, params martini.Params) string {
-    res.Header().Set("Content-Type", "image/jpeg")
-    res.Header().Set("Access-Control-Allow-Origin", "*") // TODO CORS in config
-    _, idx := listDir(rootDir, "d") 
-    path := rootDir + idx[params["dir"]] + "/" + params["obj"]
-
-    width := req.FormValue("w")
-    height := req.FormValue("h")
-
-    if width == "" && height == ""{
-        http.ServeFile(res, req, path)
-    }else{
-        // get image from cache or generate a new one
-        transformedImgPath := transformImage(path, width, height)
-        http.ServeFile(res, req, transformedImgPath)
+func getConf(conf_path string) Config {
+    path := conf_path
+    file, err := ioutil.ReadFile(path)
+    if err != nil {
+            log.Fatalf("Could not open file '%s'.", path)
+            os.Exit(1)
     }
+    conf := Config{}
+    err = json.Unmarshal(file, &conf)
+    if err != nil{
+        log.Fatal("Invalid JSON formatting.")
+    }
+    return conf
 
-    return ""
+}
 
-  })
 
-  m.Run()
+
+func main() {
+
+    args := os.Args
+    if len(args) < 2 {
+        log.Fatal("Config file and port Required. Ex: tpix settings.json :8080")
+        os.Exit(1)
+    }
+    settings_path := args[1]
+    settings_port := args[2]
+    APP_CONFIG = getConf(settings_path)
+    log.Printf("Starting Server on %s", settings_port)
+    m := martini.Classic()
+
+    m.Get("/", JSONResp, func() string {
+        // List Directories with slugs
+        objects, _ := listDir(APP_CONFIG.ROOTDIR, "d")
+        return objsToJson(objects)
+    })
+
+    // List a specific directory using its slug as a mapping
+    m.Get("/:dir", JSONResp,  func(params martini.Params) string {
+        _, idx := listDir(APP_CONFIG.ROOTDIR, "d")
+        objects, _:= listDir(APP_CONFIG.ROOTDIR + idx[params["dir"]], "f")
+        return objsToJson(objects)
+    })
+
+    m.Get("/:dir/:obj", func(res http.ResponseWriter, req *http.Request, params martini.Params) string {
+        width := req.FormValue("w")
+        height := req.FormValue("h")
+
+        res.Header().Set("Access-Control-Allow-Origin", APP_CONFIG.CORS) 
+        res.Header().Set("Cache-Control", "max-age=" + APP_CONFIG.CACHE_HEADER_EXPIRE) 
+
+        _, idx := listDir(APP_CONFIG.ROOTDIR, "d") 
+
+        path := APP_CONFIG.ROOTDIR + idx[params["dir"]] + "/" + params["obj"]
+
+        // set contentType based on file type
+        ext := filepath.Ext(params["obj"])  // the extension 
+        contentType :="jpeg" // default to jpg
+        if ext == ".png" {
+            contentType = "png"
+        }else if ext == ".gif" {
+            contentType = "gif"
+        }
+
+        res.Header().Set("Content-Type", "image/"+contentType)
+
+        if width == "" && height == ""{
+            http.ServeFile(res, req, path)
+        }else{
+            // get image from cache or generate a new one
+            transformedImgPath := transformImage(path, width, height)
+            http.ServeFile(res, req, transformedImgPath)
+        }
+
+        return ""
+
+    })
+
+    http.ListenAndServe(settings_port, m)
 }
 
 func JSONResp(res http.ResponseWriter, req *http.Request) {
     res.Header().Set("Content-Type", "application/json")
-    res.Header().Set("Access-Control-Allow-Origin", "*") // TODO CORS in config
+    res.Header().Set("Access-Control-Allow-Origin", APP_CONFIG.CORS) // TODO CORS in config
 }
